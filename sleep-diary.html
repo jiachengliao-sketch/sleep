@@ -111,7 +111,6 @@ nav button.on{color:var(--accent);font-weight:700}
 </div>
 <nav id="nav"></nav>
 <div id="toast"></div>
-
 <script>
 (function(){
 "use strict";
@@ -132,7 +131,13 @@ var sd=function(a){if(a.length<3)return null;var m=mean(a);return Math.sqrt(mean
 var weekday=["日","一","二","三","四","五","六"];
 var prettyDate=function(k){var d=parseKey(k);return (d.getMonth()+1)+"月"+d.getDate()+"日 周"+weekday[d.getDay()]};
 function duration(s,w){var a=toMin(s),b=toMin(w);if(a==null||b==null||a===b)return null;return a>b?1440-a+b:b-a}
-
+//【新增午休时长计算，午休是白天，不跨天】
+function napDuration(s,w){
+  if(!s||!w) return null;
+  var a=toMin(s),b=toMin(w);
+  if(b>=a) return b-a;
+  return null;
+}
 var AGE={
   teen:{label:"青少年 14–17 岁",lo:8,hi:10,def:9},
   adult:{label:"成年人 18–64 岁",lo:7,hi:9,def:7.5},
@@ -140,11 +145,9 @@ var AGE={
 };
 var FACTORS=[["caf","下午3点后摄入咖啡因"],["alc","睡前饮酒"],["meal","晚餐过晚/过饱"],["scr","睡前刷手机"],["ex","睡前剧烈运动"],["str","压力大/思绪多"],["nap","午睡过长"]];
 var DEFAULTS={wake:"07:00",age:"adult",latency:15,need:"auto"};
-
 var S={tab:"today",date:dkey(new Date()),days:{},settings:Object.assign({},DEFAULTS),
   mode:"local",draft:null,dirty:false,confirmDel:null};
 var col=null, migrated=false;
-
 /* ---------- storage ---------- */
 function lsLoad(){try{var r=localStorage.getItem(LS);if(r){var o=JSON.parse(r);S.days=o.days||{};S.settings=Object.assign({},DEFAULTS,o.settings||{})}}catch(e){}}
 function lsSave(){try{localStorage.setItem(LS,JSON.stringify({days:S.days,settings:S.settings}))}catch(e){}}
@@ -195,13 +198,13 @@ async function initDb(tries){
   }catch(e){}
 }
 function setStatus(){$("#status").textContent=S.mode==="db"?"☁️ 已同步 · 仅你可见":"📱 保存在本机浏览器"}
-
 /* ---------- derived data ---------- */
 function derive(k){
   var r=S.days[k];if(!r)return null;
   var dur=duration(r.sleepAt,r.wakeAt);
+  var napDur = napDuration(r.napStart, r.napEnd); //【新增午休时长】
   var ev=[r.am,r.pm,r.eve].filter(function(v){return v!=null});
-  return {k:k,r:r,dur:dur,alert:r.alert==null?null:r.alert,en:ev.length?mean(ev):null};
+  return {k:k,r:r,dur:dur,napDur:napDur,alert:r.alert==null?null:r.alert,en:ev.length?mean(ev):null};
 }
 function allDerived(){return Object.keys(S.days).sort().map(derive).filter(Boolean)}
 function pearson(x,y){
@@ -241,13 +244,16 @@ function recentDebt(){
   for(var i=0;i<7;i++){var d=derive(addDays(today,-i));if(d&&d.dur!=null){n++;debt+=Math.max(0,need-d.dur)}}
   return {debt:debt,n:n};
 }
-
 /* ---------- draft ---------- */
 function loadDraft(){
   var r=S.days[S.date];
   S.draft={
     sleepAt:r&&r.sleepAt||"23:30",
     wakeAt:r&&r.wakeAt||S.settings.wake,
+    //【新增午休draft字段】
+    napStart: r&&r.napStart||"",
+    napEnd: r&&r.napEnd||"",
+
     alert:r&&r.alert!=null?r.alert:null,
     alert30:r&&r.alert30!=null?r.alert30:null,
     awk:r&&r.awk!=null?r.awk:0,
@@ -261,11 +267,9 @@ function loadDraft(){
 }
 var ALERT_LBL=function(v){return v<=2?"非常昏沉":v<=4?"有点累":v<=6?"一般":v<=8?"比较清醒":"精神饱满"};
 var ENERGY_LBL=function(v){return v<=2?"几乎耗尽":v<=4?"偏低":v<=6?"一般":v<=8?"不错":"充沛"};
-
 /* ---------- toast ---------- */
 var tt;
 function toast(m){var t=$("#toast");t.textContent=m;t.classList.add("show");clearTimeout(tt);tt=setTimeout(function(){t.classList.remove("show")},2200)}
-
 /* ---------- views ---------- */
 function slider(id,val,lbl){
   return '<div class="sl"><input type="range" min="1" max="10" step="1" value="'+(val==null?5:val)+'" data-sl="'+id+'" aria-label="'+id+'">'+
@@ -276,18 +280,28 @@ function viewToday(){
   var h='<div class="date-nav"><button class="ghost" data-act="prev" aria-label="前一天">‹</button>'+
     '<input type="date" value="'+k+'" max="'+dkey(new Date())+'" data-date="1"><button class="ghost" data-act="next" aria-label="后一天">›</button></div>';
   h+='<p class="sub" style="margin:-4px 2px 12px">'+prettyDate(k)+'（以起床当天为准，记录“昨晚”的睡眠）</p>';
-
   h+='<div class="card"><h2>☀️ 早晨记录 · 昨晚睡眠</h2><p class="sub">起床后马上填，记忆最准。</p>'+
     '<div class="row"><div><label class="l">入睡时间</label><input type="time" value="'+d.sleepAt+'" data-f="sleepAt"></div>'+
     '<div><label class="l">起床时间</label><input type="time" value="'+d.wakeAt+'" data-f="wakeAt"></div></div>'+
-    '<div style="margin-top:12px"><span class="big" id="durOut"></span><span id="durHint"></span></div>'+
+    '<div style="margin-top:12px"><span class="big" id="durOut"></span><span id="durHint"></span></div>';
+
+    //【新增午休模块HTML】
+    h+='<div style="margin-top:16px;border-top:1px solid var(--line);padding-top:14px;">'+
+      '<label class="l">😴 午休记录（白天午睡）</label>'+
+      '<div class="row">'+
+        '<div><label class="l">午休开始</label><input type="time" value="'+esc(d.napStart)+'" data-f="napStart"></div>'+
+        '<div><label class="l">午休结束</label><input type="time" value="'+esc(d.napEnd)+'" data-f="napEnd"></div>'+
+      '</div>'+
+      '<div style="margin-top:8px;font-size:14px;color:var(--mute)">午休时长：<span id="napOut">—</span></div>'+
+    '</div>';
+
+  h+=
     '<label class="l">醒来时的清醒程度（1 昏沉 → 10 精神饱满）</label>'+slider("alert",d.alert,ALERT_LBL)+
     '<label class="l">起床 30 分钟后的清醒程度（可选，用来观察睡眠惯性）</label>'+slider("alert30",d.alert30,ALERT_LBL)+
     '<label class="l">夜间醒来次数</label><div class="stepper"><button data-act="awk-" aria-label="减少">−</button><span id="awkOut">'+d.awk+'</span><button data-act="awk+" aria-label="增加">+</button></div>'+
     '<label class="l">昨天有这些情况吗？（可多选）</label><div class="chips">'+
     FACTORS.map(function(f){return '<button class="chip'+(d.factors.indexOf(f[0])>=0?" on":"")+'" data-chip="'+f[0]+'">'+f[1]+'</button>'}).join("")+
     '</div><button class="primary" data-act="saveMorning">保存早晨记录</button></div>';
-
   h+='<div class="card"><h2>🌙 晚间复盘 · 今日精力指数</h2><p class="sub">睡前花 30 秒，凭感觉打分。</p>'+
     '<label class="l">上午精力</label>'+slider("am",d.am,ENERGY_LBL)+
     '<label class="l">下午精力</label>'+slider("pm",d.pm,ENERGY_LBL)+
@@ -295,7 +309,6 @@ function viewToday(){
     '<div style="margin-top:12px">今日综合精力：<b id="enOut">—</b></div>'+
     '<label class="l">今日小结（可选）</label><textarea data-f="note" placeholder="例如：下午犯困，咖啡喝晚了…">'+esc(d.note)+'</textarea>'+
     '<button class="primary" data-act="saveEvening">保存晚间复盘</button></div>';
-
   var debt=recentDebt();
   h+='<div class="card"><h2>🛏️ 今晚建议</h2>'+
     '<div class="big">'+fmtT(p.bed)+' 上床</div>'+
@@ -304,19 +317,18 @@ function viewToday(){
     '<button class="ghost" data-tab="plan">查看完整睡眠计划</button></div>';
   return h;
 }
-
 function chartDur(rows,lo,hi){
   var W=340,H=170,pl=26,pr=6,pt=10,pb=22,iw=W-pl-pr,ih=H-pt-pb,ymax=12,bw=iw/rows.length;
   var Y=function(v){return pt+ih-ih*v/ymax};
   var s='<svg viewBox="0 0 '+W+' '+H+'" role="img" aria-label="近14天睡眠时长">';
-  [0,4,8,12].forEach(function(v){s+='<line class="grid" x1="'+pl+'" x2="'+(W-pr)+'" y1="'+Y(v)+'" y2="'+Y(v)+'"/><text class="ax" x="'+(pl-4)+'" y="'+(Y(v)+3)+'" text-anchor="end">'+v+'</text>'});
-  s+='<rect x="'+pl+'" y="'+Y(hi)+'" width="'+iw+'" height="'+(Y(lo)-Y(hi))+'" style="fill:var(--good);opacity:.12"/>';
-  s+='<line class="tgt" x1="'+pl+'" x2="'+(W-pr)+'" y1="'+Y(lo)+'" y2="'+Y(lo)+'"/>';
+  [0,4,8,12].forEach(function(v){s+='<line class="grid" x1="'+pl+'" x2="'+(W-pr)+'" y1="'+Y(v)+'" y2="'+Y(v)+'" /><text class="ax" x="'+(pl-4)+'" y="'+(Y(v)+3)+'" text-anchor="end">'+v+'</text>'});
+  s+='<rect x="'+pl+'" y="'+Y(hi)+'" width="'+iw+'" height="'+(Y(lo)-Y(hi))+'" style="fill:var(--good);opacity:.12" />';
+  s+='<line class="tgt" x1="'+pl+'" x2="'+(W-pr)+'" y1="'+Y(lo)+'" y2="'+Y(lo)+'" />';
   rows.forEach(function(r,i){
     var x=pl+i*bw+bw*0.18,w=bw*0.64;
     if(r.dur!=null){
       var hh=r.dur/60,ok=hh>=lo&&hh<=hi+0.5;
-      s+='<rect x="'+x+'" y="'+Y(Math.min(hh,ymax))+'" width="'+w+'" height="'+(Y(0)-Y(Math.min(hh,ymax)))+'" rx="3" style="fill:'+(ok?"var(--c-sleep)":"var(--warn)")+'"/>';
+      s+='<rect x="'+x+'" y="'+Y(Math.min(hh,ymax))+'" width="'+w+'" height="'+(Y(0)-Y(Math.min(hh,ymax)))+'" rx="3" style="fill:'+(ok?"var(--c-sleep)":"var(--warn)")+'" />';
     }
     if(i%2===(rows.length-1)%2)s+='<text class="ax" x="'+(pl+i*bw+bw/2)+'" y="'+(H-6)+'" text-anchor="middle">'+parseKey(r.k).getDate()+'</text>';
   });
@@ -326,7 +338,7 @@ function chartScores(rows){
   var W=340,H=170,pl=26,pr=6,pt=10,pb=22,iw=W-pl-pr,ih=H-pt-pb,bw=iw/rows.length;
   var Y=function(v){return pt+ih-ih*v/10};
   var s='<svg viewBox="0 0 '+W+' '+H+'" role="img" aria-label="近14天清醒度与精力">';
-  [0,5,10].forEach(function(v){s+='<line class="grid" x1="'+pl+'" x2="'+(W-pr)+'" y1="'+Y(v)+'" y2="'+Y(v)+'"/><text class="ax" x="'+(pl-4)+'" y="'+(Y(v)+3)+'" text-anchor="end">'+v+'</text>'});
+  [0,5,10].forEach(function(v){s+='<line class="grid" x1="'+pl+'" x2="'+(W-pr)+'" y1="'+Y(v)+'" y2="'+Y(v)+'" /><text class="ax" x="'+(pl-4)+'" y="'+(Y(v)+3)+'" text-anchor="end">'+v+'</text>'});
   function line(key,color){
     var path="",pen=false,dots="";
     rows.forEach(function(r,i){
@@ -334,9 +346,9 @@ function chartScores(rows){
       if(v==null){pen=false;return}
       var x=pl+i*bw+bw/2,y=Y(v);
       path+=(pen?"L":"M")+x.toFixed(1)+" "+y.toFixed(1)+" ";pen=true;
-      dots+='<circle cx="'+x.toFixed(1)+'" cy="'+y.toFixed(1)+'" r="3" style="fill:'+color+'"/>';
+      dots+='<circle cx="'+x.toFixed(1)+'" cy="'+y.toFixed(1)+'" r="3" style="fill:'+color+'" />';
     });
-    return '<path d="'+path+'" fill="none" style="stroke:'+color+';stroke-width:2"/>'+dots;
+    return '<path d="'+path+'" fill="none" style="stroke:'+color+';stroke-width:2" />'+dots;
   }
   s+=line("alert","var(--c-alert)")+line("en","var(--c-energy)");
   rows.forEach(function(r,i){if(i%2===(rows.length-1)%2)s+='<text class="ax" x="'+(pl+i*bw+bw/2)+'" y="'+(H-6)+'" text-anchor="middle">'+parseKey(r.k).getDate()+'</text>'});
@@ -388,7 +400,7 @@ function viewTrend(){
   var al=all.filter(function(x){return x.alert!=null}).slice(-7),en=all.filter(function(x){return x.en!=null}).slice(-7);
   var debt=recentDebt();
   var h='<div class="card"><h2>近期概览（最近 7 次）</h2><div class="grid2" style="margin-top:10px">'+
-    '<div class="stat"><small>平均睡眠</small><b>'+(avgDur!=null?fmtDur(avgDur):"—")+'</b></div>'+
+    '<div class="stat"><small>平均夜间睡眠</small><b>'+(avgDur!=null?fmtDur(avgDur):"—")+'</b></div>'+
     '<div class="stat"><small>睡眠债（近7天）</small><b>'+(debt.n?fmtH(debt.debt/60):"—")+'</b></div>'+
     '<div class="stat"><small>平均醒来清醒度</small><b>'+(al.length?mean(al.map(function(x){return x.alert})).toFixed(1):"—")+'</b></div>'+
     '<div class="stat"><small>平均精力指数</small><b>'+(en.length?mean(en.map(function(x){return x.en})).toFixed(1):"—")+'</b></div></div></div>';
@@ -406,12 +418,10 @@ function viewPlan(){
     '<div><label class="l">入睡约需（分钟）</label><select data-set="latency">'+[5,10,15,20,30,45].map(function(v){return '<option value="'+v+'"'+(+s.latency===v?" selected":"")+'>'+v+'</option>'}).join("")+'</select></div></div>'+
     '<label class="l">睡眠需求</label><select data-set="need"><option value="auto"'+(s.need==="auto"?" selected":"")+'>自动（推荐范围内，数据足够时按你的数据调整）</option>'+
     [6.5,7,7.5,8,8.5,9,9.5].map(function(v){return '<option value="'+v+'"'+(String(s.need)===String(v)?" selected":"")+'>固定 '+v+' 小时</option>'}).join("")+'</select></div>';
-
   h+='<div class="card"><h2>今晚的最佳上床时间</h2><div class="big">'+fmtT(p.bed)+'</div>'+
     '<p class="sub" style="margin-top:6px">起床 '+s.wake+' − 睡眠 '+fmtH(p.need/60)+' − 入睡 '+p.lat+' 分钟'+
     (s.need==="auto"&&pers?'。已参考你的数据（表现最佳约 '+fmtH(pers.h)+'）':'')+'。</p>'+
     (debt.n>=3&&debt.debt>=180?'<p class="sub" style="color:var(--warn)">⚠️ 近 7 天欠觉约 '+fmtH(debt.debt/60)+'：本周先提前 30 分钟上床，之后每晚再提前 15 分钟，别靠周末大补觉（起床时间偏差不要超过 1 小时）。</p>':'')+'</div>';
-
   var items=[
     {t:p.bed-480,m:"最后一杯咖啡/茶/能量饮料（咖啡因半衰期约 5–7 小时）"},
     {t:p.bed-240,m:"停止饮酒（酒精会让后半夜睡得更碎）"},
@@ -423,12 +433,10 @@ function viewPlan(){
   ].sort(function(x,y){return x.t-y.t});
   h+='<div class="card"><h2>🌙 今晚时间线</h2><ul class="tl">'+items.map(function(x){return '<li'+(x.bed?' class="bed"':'')+'><span class="t">'+fmtT(x.t)+'</span><span>'+x.m+'</span></li>'}).join("")+
     '<li><span class="t">'+fmtT(p.wake)+'</span><span>起床；30 分钟内晒 10–30 分钟自然光，帮助稳定生物钟</span></li></ul></div>';
-
   var rowsC=[6,5,4].map(function(n){var dur=n*90,bed=p.wake-dur-p.lat;
     return '<tr><td>'+n+' 个周期</td><td>'+fmtH(dur/60)+'</td><td><b>'+fmtT(bed)+'</b></td><td>'+(n===6?"充足":n===5?"推荐":"仅应急")+'</td></tr>'}).join("");
   h+='<div class="card"><h2>🔁 按 90 分钟睡眠周期推算</h2><p class="sub">一个睡眠周期约 90 分钟（个体 70–110 分钟），在周期结束时醒来通常更轻松。</p>'+
     '<table class="cyc"><tr><th>周期</th><th>时长</th><th>上床</th><th>适用</th></tr>'+rowsC+'</table></div>';
-
   h+='<div class="card"><h2>📌 白天的习惯</h2><ul class="ins">'+
     '<li><span>🕖</span><span>每天起床时间固定（含周末），比固定入睡时间更重要。</span></li>'+
     '<li><span>☀️</span><span>早晨接触自然光，白天多出门，夜里避免强光。</span></li>'+
@@ -442,15 +450,18 @@ function viewLog(){
   if(!rows.length)return '<div class="card"><div class="empty-box">还没有记录。</div></div>';
   return '<div class="card"><h2>全部记录</h2><p class="sub">点“编辑”回到当天修改。</p>'+rows.map(function(x){
     var r=x.r,en=x.en!=null?x.en.toFixed(1):"—";
+    var napText = "";
+    if(x.napDur!=null){
+      napText = " · 午休 "+fmtDur(x.napDur);
+    }
     return '<div class="rec"><div class="main"><div class="d">'+prettyDate(x.k)+'</div>'+
-      '<div class="m">'+(r.sleepAt?r.sleepAt+" → "+r.wakeAt+(x.dur!=null?" · "+fmtDur(x.dur):""):"仅晚间复盘")+'</div>'+
+      '<div class="m">'+(r.sleepAt?r.sleepAt+" → "+r.wakeAt+(x.dur!=null?" · "+fmtDur(x.dur):""):"仅晚间复盘")+napText+'</div>'+
       '<div class="m">醒来清醒 '+(x.alert!=null?x.alert:"—")+" · 精力 "+en+(r.awk?" · 夜醒 "+r.awk+" 次":"")+'</div>'+
       (r.note?'<div class="m">📝 '+esc(r.note)+'</div>':'')+'</div>'+
       '<div class="acts"><button class="ghost" data-edit="'+x.k+'">编辑</button>'+
       (S.confirmDel===x.k?'<button class="ghost danger" data-del="'+x.k+'">确认删除</button>':'<button class="ghost" data-del="'+x.k+'">删除</button>')+'</div></div>';
   }).join("")+'</div>';
 }
-
 var TABS=[["today","🌅","今天"],["trend","📈","趋势"],["plan","🗓️","计划"],["log","📒","记录"]];
 function render(){
   $("#nav").innerHTML=TABS.map(function(t){return '<button class="'+(S.tab===t[0]?"on":"")+'" data-tab="'+t[0]+'"><span>'+t[1]+'</span>'+t[2]+'</button>'}).join("");
@@ -469,10 +480,16 @@ function updateLive(){
     var hh=du/60,cls=hh>=a.lo&&hh<=a.hi+0.5?"good":hh<a.lo-1?"bad":"warn";
     hint.innerHTML='<span class="pill '+cls+'">'+(hh<a.lo?"偏少":hh>a.hi+0.5?"偏多":"在推荐范围")+'</span>';
   }
+  //【更新午休实时计算】
+  var napOut=$("#napOut");
+  if(napOut){
+    var nd=napDuration(d.napStart,d.napEnd);
+    napOut.textContent = nd ? fmtDur(nd) : "—";
+  }
+
   var ev=[d.am,d.pm,d.eve].filter(function(v){return v!=null}),eo=$("#enOut");
   if(eo)eo.textContent=ev.length?mean(ev).toFixed(1)+" / 10":"—";
 }
-
 /* ---------- events ---------- */
 document.addEventListener("input",function(e){
   var t=e.target;
@@ -516,8 +533,7 @@ document.addEventListener("click",async function(e){
   if(act==="prev"||act==="next"){
     var n=addDays(S.date,act==="prev"?-1:1);
     if(n>dkey(new Date()))return;
-    if(S.dirty)toast("未保存的修改已丢弃");
-    S.date=n;loadDraft();render();return;
+    if(S.dirty)toast("未保存的修改已丢弃");S.date=n;loadDraft();render();return;
   }
   if(act==="awk-"||act==="awk+"){
     S.draft.awk=clamp(S.draft.awk+(act==="awk+"?1:-1),0,9);S.dirty=true;$("#awkOut").textContent=S.draft.awk;return;
@@ -526,7 +542,17 @@ document.addEventListener("click",async function(e){
   if(act==="saveMorning"){
     if(duration(d.sleepAt,d.wakeAt)==null){toast("请先填写入睡和起床时间");return}
     var prev=S.days[k]||{};
-    S.days[k]=Object.assign({},prev,{sleepAt:d.sleepAt,wakeAt:d.wakeAt,alert:d.alert,alert30:d.alert30,awk:d.awk,factors:d.factors.slice(),updated:Date.now()});
+    S.days[k]=Object.assign({},prev,{
+      sleepAt:d.sleepAt,
+      wakeAt:d.wakeAt,
+      alert:d.alert,
+      alert30:d.alert30,
+      awk:d.awk,
+      factors:d.factors.slice(),
+      napStart:d.napStart, //保存午休开始
+      napEnd:d.napEnd,     //保存午休结束
+      updated:Date.now()
+    });
     S.dirty=false;
     var ok=await persistDay(k);if(ok)toast("早晨记录已保存 ✔");
   }
@@ -538,7 +564,6 @@ document.addEventListener("click",async function(e){
     var ok2=await persistDay(k);if(ok2)toast("晚间复盘已保存 ✔");
   }
 });
-
 lsLoad();loadDraft();setStatus();render();initDb(0);
 })();
 </script>
